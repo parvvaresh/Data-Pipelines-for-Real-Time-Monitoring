@@ -1,114 +1,164 @@
-# Tehran House Price Prediction Web App
+# Data Pipelines for Real-Time Monitoring
 
-This repository contains a web application for predicting house prices in Tehran based on features such as area, construction year, room count, amenities, and location. The model was developed using machine learning techniques and deployed as a Flask web app.
+This repository contains a small, self-contained example platform that demonstrates a real-time data pipeline using Kafka (KRaft mode), Logstash, Elasticsearch and Kibana. A lightweight synthetic producer (the `fake-app`) generates JSON log events and pushes them to Kafka. Logstash consumes those messages, performs basic parsing, and indexes them into Elasticsearch for analysis and visualization in Kibana.
 
-## Table of Contents
+The setup is optimized for local development and testing using Docker Compose.
 
-- [Overview](#overview)
-- [Features](#features)
-- [Repository Structure](#repository-structure)
-- [Setup and Installation](#setup-and-installation)
-- [Usage](#usage)
-- [File Descriptions](#file-descriptions)
-- [Overview app](#Overview-app)
-- [License](#license)
+## Architecture and runtime flow
 
-## Overview
+- Kafka (Bitnami image) runs in KRaft mode (no Zookeeper). It exposes PLAINTEXT listener on port 9092.
+- `kafka-init` is a one-time helper container that waits for Kafka to be ready and creates the configured topic(s).
+- `fake-app` is a Go-based producer that emits synthetic log events to the configured Kafka topic at a configurable rate.
+- `kafka-ui` (Provectus Kafka UI) provides a web interface for inspecting topics and messages.
+- Logstash subscribes to the Kafka topic, applies light parsing and field normalisation, and writes events to Elasticsearch.
+- Elasticsearch stores the indexed logs; Kibana connects to Elasticsearch to provide a dashboard and discovery UI.
 
-The application processes user inputs for a given property (e.g., area, year built, number of rooms, and available amenities) along with the location. It then predicts the house price using a pre-trained Linear Regression model. The model and the scaler are stored as pickle files in the `model` folder. The application also provides basic error handling and input validation.
+Service interactions (high level):
 
-A [Google Colab version of the notebook](https://colab.research.google.com/drive/19QUVMy9dylD7fxBzKsK1jtoQCujWAmgg?usp=sharing) used to develop the model is available.
+1. Start Docker Compose. Services start in the order defined in `docker-compose.yml` and controlled by `depends_on` conditions and healthchecks.
+2. Kafka accepts messages from producers at `kafka:9092`.
+3. `kafka-init` waits until Kafka is healthy and creates the topic defined by `KAFKA_TOPIC`.
+4. `fake-app` produces JSON messages to the topic.
+5. Logstash consumes the topic and writes to Elasticsearch (index pattern: `logs-YYYY.MM.dd`).
+6. Kibana connects to Elasticsearch for visualization; `kafka-ui` connects to Kafka for topic inspection.
 
-## Features
+## Key files
 
-- **User-Friendly Web Interface:** Allows users to enter property details through a simple HTML form.
-- **Input Validation:** Validates inputs such as area (20–500 m²) and construction year (1320–1403).
-- **Model Prediction:** Uses a saved Random Forest model to generate price predictions.
-- **Result Display:** Predicted prices are formatted using a custom currency filter.
-- **Error Handling:** Displays appropriate error messages for invalid input or system issues.
+- `docker-compose.yml` — main orchestration file defining services, environment interpolation, and volumes.
+- `.env` — environment variables used by Compose (image tags, ports, topic names, JVM opts, etc.).
+- `fake-app/` — small Go program (producer) and its `Dockerfile`.
+- `logstash/pipeline/pipeline.conf` — Logstash pipeline: Kafka input, basic filters, Elasticsearch + stdout outputs.
+- `logstash/config/logstash.yml` and `logstash/config/pipelines.yml` — Logstash configuration files used by the container.
 
-## Repository Structure
+## Configuration (.env)
 
+The project loads runtime values from `.env` in the repository root. Notable variables:
+
+- `ELK_VERSION` — Elasticsearch / Kibana / Logstash version tag used with `docker.elastic.co` images.
+- `KAFKA_IMAGE` — Kafka docker image (Bitnami). Must be set to a tag that exists on Docker Hub (see Troubleshooting).
+- `KAFKA_BROKER_ID` — Kafka node id used in KRaft configuration.
+- `KAFKA_BROKERS` — bootstrap server address used by clients (default `kafka:9092`).
+- `KAFKA_TOPIC` — topic created by `kafka-init` and consumed by Logstash.
+- `KAFKA_PARTITIONS` — number of partitions created for the topic.
+- JVM options for Elasticsearch and Logstash: `ES_JAVA_XMS`, `ES_JAVA_XMX`, `LS_JAVA_XMS`, `LS_JAVA_XMX`.
+- `FAKE_RATE_PER_SEC`, `FAKE_ERROR_RATE` — controls `fake-app` message rate and error frequency.
+
+Keep in mind: some images (notably Bitnami images) require precise tags (for example `3.8.2-debian-11-r0`). Using `latest` or a non-existent tag will produce Docker manifest errors.
+
+## How to run
+
+Prerequisites:
+
+- Docker and Docker Compose (v2) installed and functional.
+- At least a few GB free disk and some memory (Elasticsearch is memory hungry).
+
+Start the stack from the repository root:
+
+```bash
+docker compose up -d --build
 ```
-├── app.py                      # Flask application file for running the web app.
-├── model
-│   ├── best_model.pkl   # Pickled trained Random Forest model.
-│   ├── README.md               # README specific to the model folder.
-│   └── scaler.pkl              # Pickled StandardScaler used for model input normalization.
-├── __pycache__
-│   └── utils.cpython-312.pyc   # Cached bytecode for the utils module.
-├── static                      # Contains static files (CSS, JavaScript, images).
-│   ├── icon.jpg
-│   ├── script.js
-│   └── styles.css
-├── templates                   # HTML templates for rendering the web pages.
-│   ├── error.html
-│   ├── index.html
-│   └── result.html
-└── utils.py                    # Utility functions including model loading and prediction.
+
+Check service status:
+
+```bash
+docker compose ps
+docker compose logs -f kafka
+docker compose logs -f logstash
+docker compose logs -f fake-app
 ```
 
-## Setup and Installation
+Verify the topic exists (exec into the Kafka container and use the bundled tooling):
 
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/parvvaresh/Tehran-house-price-forecast
-   cd Tehran-house-price-forecast
-   ```
+```bash
+docker compose exec kafka kafka-topics.sh --bootstrap-server kafka:9092 --list
+```
 
-2. **Create a Virtual Environment (Optional):**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+Check Elasticsearch health:
 
-3. **Install Dependencies:**
-   Make sure you have Flask and other required libraries installed:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+curl -s http://localhost:9200/_cluster/health | jq
+```
 
+Logstash pipelines can be checked via its monitoring endpoint:
 
-4. **Model Files:**
-   Ensure that the model files (`best_linear_model.pkl` and `scaler.pkl`) are present in the `model` directory.
+```bash
+curl -s http://localhost:9600/_node/pipelines
+```
 
-## Usage
+Open UIs:
 
-1. **Run the Flask Application:**
-   ```bash
-   python app.py
-   ```
-   The app will start on port 5002 (or the specified port).
+- Kafka UI: http://localhost:8080
+- Kibana: http://localhost:5601
 
-2. **Access the Web Interface:**
-   Open your web browser and navigate to `http://127.0.0.1:5002/`.
+## Fake producer behavior
 
-3. **Input Data:**
-   - Choose a valid address from the provided list.
-   - Enter property area (between 20 and 500 square meters).
-   - Input the year of construction (between 1320 and 1403).
-   - Select the number of rooms.
-   - Choose available amenities (e.g., انبار, پارکینگ, آسانسور).
+The `fake-app` project is a simple Go program that:
 
-4. **View Prediction:**
-   Once the form is submitted, the application will redirect to a results page showing the predicted price.
+- Reads env vars: `KAFKA_BROKERS`, `KAFKA_TOPIC`, `RATE_PER_SEC`, `ERROR_RATE`.
+- Builds structured JSON `LogEvent` messages containing timestamp, host, service, level, path, latency and IDs.
+- Writes messages synchronously to Kafka using `segmentio/kafka-go`.
+- Runs indefinitely, sleeping between messages to meet the configured rate.
 
-## File Descriptions
+This component is intended as a controllable load generator to exercise the pipeline.
 
-- **app.py:** Main Flask application that defines routes, handles user input, performs prediction using the model, and renders templates.
-- **utils.py:** Contains helper functions, including `load_model_and_predict`, which loads the pickled model and scaler to perform predictions.
-- **model/**: Contains the trained model (`best_linear_model.pkl`) and scaler (`scaler.pkl`), along with a README specific to the model.
-- **templates/:**
-  - **index.html:** Home page with the input form.
-  - **result.html:** Displays the predicted price.
-  - **error.html:** Shows error messages for invalid inputs or system errors.
-- **static/:**
-  - **styles.css:** Styling for the web app.
-  - **script.js:** JavaScript code for any dynamic functionality.
-  - **icon.jpg:** Icon or image used in the application.
+## Logstash pipeline logic
 
-## Overview app
-![form page](assets/index.png)
+- Input: `kafka` consumer, configured using `${KAFKA_BROKERS}` and `${KAFKA_TOPIC}`.
+- Filters: simple renaming of `msg` to `message`, parse `ts` into `@timestamp`, lowercase the `level` and ensure `service` is present.
+- Output: index events to Elasticsearch with index pattern `logs-YYYY.MM.dd`, and also print to stdout for debugging.
 
+## Troubleshooting
 
-![result](assets/predict.png)
+1. Docker manifest / image tag errors (common):
+
+   Error example: "manifest for bitnami/kafka:3.7 not found".
+
+   Cause: the `KAFKA_IMAGE` value in `.env` references a tag that does not exist on Docker Hub. Bitnami images use specific tags (including OS and revision suffixes).
+
+   Resolution:
+
+   - Inspect available tags using Docker Hub or the registry API:
+
+     ```bash
+     curl -s 'https://registry.hub.docker.com/v2/repositories/bitnami/kafka/tags?page_size=100' | jq -r '.results[].name' | head -n 40
+     ```
+
+   - Or test a tag locally using `docker manifest inspect`:
+
+     ```bash
+     docker manifest inspect bitnami/kafka:3.8.2-debian-11-r0
+     ```
+
+   - Update `.env` with a valid tag and re-run `docker compose up -d --build`.
+
+2. Elasticsearch memory issues:
+
+   - Reduce `ES_JAVA_XMS`/`ES_JAVA_XMX` in `.env` for low-memory development machines.
+
+3. Ports already in use:
+
+   - Modify the port bindings in `docker-compose.yml` or stop the service using the port.
+
+4. Topic not created:
+
+   - Check `kafka-init` logs. It waits for Kafka to be healthy and then runs `kafka-topics.sh` to create the configured topic. If Kafka failed or is slow to start, `kafka-init` may not run successfully; check `docker compose logs kafka-init`.
+
+## Contract (inputs / outputs / success criteria)
+
+- Inputs: `.env` environment file, Docker installed, network/ports available.
+- Outputs: running containers for Kafka, Logstash, Elasticsearch, Kibana, producing and indexed log documents in Elasticsearch.
+- Success criteria: `fake-app` writes messages; Logstash consumes and Elasticsearch shows indexed documents; Kibana and Kafka UI accessible.
+
+## Notes and next steps
+
+- The Docker Compose file currently uses environment interpolation from `.env`. Keep image tags explicit (avoid `latest`) to ensure reproducible environments.
+- For more robust Kafka testing, consider using an image that provides KRaft-ready tags or run a multi-node Kafka cluster when replicating production scenarios.
+
+If you want, I can also:
+
+- Add a small health check script or Makefile to simplify common commands.
+- Add a minimal Kibana dashboard or sample queries for quick verification.
+
+---
+
+End of README.
