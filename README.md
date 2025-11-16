@@ -22,6 +22,16 @@ Service interactions (high level):
 5. Logstash consumes the topic and writes to Elasticsearch (index pattern: `logs-YYYY.MM.dd`).
 6. Kibana connects to Elasticsearch for visualization; `kafka-ui` connects to Kafka for topic inspection.
 
+
+Pipeline diagram:
+
+Producer (fake-app) ──► Kafka (topic=logs.v1) ──► Consumer (Logstash) ──► Elasticsearch ──► Kibana
+
+Explanation of the flow:
+
+Producer (fake-app) sends synthetic JSON messages to the `logs.v1` topic in Kafka. Kafka receives and stores messages and makes them available to consumers. Logstash acts as a consumer: it subscribes to the topic, reads messages, applies filters and transformations (for example, timestamp parsing and field normalization), and then indexes events into Elasticsearch. Finally, Kibana allows users to search, analyze, and visualize the indexed logs.
+
+
 ## Key files
 
 - `docker-compose.yml` — main orchestration file defining services, environment interpolation, and volumes.
@@ -159,6 +169,4 @@ If you want, I can also:
 - Add a small health check script or Makefile to simplify common commands.
 - Add a minimal Kibana dashboard or sample queries for quick verification.
 
----
-
-End of README.
+--
